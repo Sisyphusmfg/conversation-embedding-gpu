@@ -1,0 +1,8 @@
+torch>=2.0.0
+torchvision>=0.15.0
+torchaudio>=2.0.0
+sentence-transformers>=2.2.0
+qdrant-client>=1.6.0
+numpy>=1.21.0
+transformers>=4.21.0
+accelerate>=0.20.0
