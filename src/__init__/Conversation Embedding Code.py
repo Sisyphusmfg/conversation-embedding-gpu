@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 from typing import List, Dict, Optional
 import torch
+import hashlib
 from sentence_transformers import SentenceTransformer
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
@@ -90,11 +91,10 @@ class DoclingConversationEmbedder:
     def is_file_processed(self, file_path: str, file_modified_time: str) -> bool:
         """Check if a file has already been processed based on path and modification time."""
         try:
-            # Search for existing record of this file
-            search_result = self.client.query_points(
+            # Use scroll with filter instead of vector search for efficiency
+            scroll_result = self.client.scroll(
                 collection_name=self.processed_files_collection,
-                query=[0.0],  # Dummy vector
-                query_filter=models.Filter(
+                scroll_filter=models.Filter(
                     must=[
                         models.FieldCondition(
                             key="file_path",
@@ -102,13 +102,17 @@ class DoclingConversationEmbedder:
                         )
                     ]
                 ),
-                limit=1,
+                limit=100,  # Allow multiple records per file
                 with_payload=True
             )
 
-            if search_result.points:
-                stored_mod_time = search_result.points[0].payload.get("file_modified_time")
-                return stored_mod_time == file_modified_time
+            points = scroll_result[0]
+
+            # Check all matching records for the modification time
+            for point in points:
+                stored_mod_time = point.payload.get("file_modified_time")
+                if stored_mod_time == file_modified_time:
+                    return True
 
             return False
         except Exception as e:
@@ -119,8 +123,13 @@ class DoclingConversationEmbedder:
                             document_name: str, chunk_count: int):
         """Mark a file as processed in the tracking collection."""
         try:
+            # Generate deterministic UUID from file path using SHA256
+            path_hash = hashlib.sha256(file_path.encode('utf-8')).hexdigest()
+            # Create UUID from first 32 chars of hash (deterministic but valid UUID format)
+            point_id = str(uuid.UUID(path_hash[:32]))
+
             point = models.PointStruct(
-                id=str(uuid.uuid4()),
+                id=point_id,  # Deterministic UUID prevents duplicates
                 vector=[0.0],  # Dummy vector
                 payload={
                     "file_path": file_path,
@@ -181,7 +190,7 @@ class DoclingConversationEmbedder:
 
         for i, chunk in enumerate(chunks):
             payload = chunk["payload"]
-            extended_metadata = chunk["extended_metadata"]
+            extended_metadata = chunk.get("extended_metadata", {})
 
             # Use pre-computed embedding
             embedding = embeddings[i]
@@ -190,7 +199,11 @@ class DoclingConversationEmbedder:
             speaker_id = payload["speaker"]
             speaker_info = speaker_analytics["speakers"].get(speaker_id, {})
 
-            # Create comprehensive payload
+            # Get schema version info from chunk or document
+            schema_version = extended_metadata.get("schema_version", document_info.get("schema_version", "unknown"))
+            tool_version = extended_metadata.get("tool_version", document_info.get("tool_version", "unknown"))
+
+            # Create comprehensive payload with enhanced metadata
             point_payload = {
                 # Core conversation data
                 "conversation_id": conversation_id,
@@ -204,22 +217,26 @@ class DoclingConversationEmbedder:
                 "source_file": document_info["source_file"],
                 "total_chunks": document_info["total_chunks"],
                 "processed_at": document_info["processed_at"],
+                "schema_version": schema_version,
+                "tool_version": tool_version,
 
-                # Chunk-specific metadata
-                "chunk_method": extended_metadata["metadata"]["chunk_method"],
-                "estimated_duration_seconds": extended_metadata["metadata"]["estimated_duration_seconds"],
+                # Enhanced chunk-specific metadata
+                "chunk_method": extended_metadata.get("metadata", {}).get("chunk_method", "unknown"),
+                "estimated_duration_seconds": extended_metadata.get("metadata", {}).get("estimated_duration_seconds",
+                                                                                        0),
                 "text_length": len(payload["text"]),
                 "word_count": len(payload["text"].split()),
 
-                # Speaker information
+                # Enhanced speaker information with new analytics
                 "speaker_display_name": speaker_info.get("display_name", "Unknown"),
                 "speaker_type": speaker_info.get("speaker_type", "unknown"),
                 "speaker_utterance_count": speaker_info.get("utterance_count", 0),
                 "speaker_total_words": speaker_info.get("total_words", 0),
                 "speaker_participation_percentage": speaker_info.get("participation_percentage", 0),
+                "speaker_word_percentage": speaker_info.get("word_percentage", 0),
                 "speaker_avg_words_per_utterance": speaker_info.get("average_words_per_utterance", 0),
 
-                # Extended speaker metadata if available
+                # Extended speaker metadata
                 "utterance_id": extended_metadata.get("speaker_metadata", {}).get("utterance_id", ""),
                 "original_speaker_label": extended_metadata.get("speaker_metadata", {}).get("original_speaker_label",
                                                                                             ""),
@@ -228,6 +245,10 @@ class DoclingConversationEmbedder:
                 "is_short_utterance": len(payload["text"].split()) < 10,
                 "is_long_utterance": len(payload["text"].split()) > 50,
                 "contains_question": "?" in payload["text"],
+
+                # Timing and flow analysis
+                "has_timing_estimate": extended_metadata.get("metadata", {}).get("estimated_duration_seconds", 0) > 0,
+                "processing_method": document_info.get("processing_method", "unknown"),
             }
 
             # Create point
@@ -337,6 +358,34 @@ class DoclingConversationEmbedder:
             )
             print(f"Stored {len(points)} speaker segments for conversation {conversation_id}")
 
+    def validate_chunk_format(self, chunk: Dict) -> bool:
+        """Validate that chunk has the expected format from the new chunking system."""
+        try:
+            # Check for required top-level structure
+            if "payload" not in chunk:
+                return False
+
+            payload = chunk["payload"]
+            required_fields = ["conversation_id", "chunk_index", "text", "timestamp", "speaker"]
+
+            for field in required_fields:
+                if field not in payload:
+                    return False
+
+            # Check for extended metadata (optional but expected from new system)
+            if "extended_metadata" in chunk:
+                metadata = chunk["extended_metadata"]
+                if "schema_version" in metadata and "tool_version" in metadata:
+                    # New format detected
+                    return True
+
+            # Backward compatibility - old format is still valid
+            return True
+
+        except Exception as e:
+            print(f"Error validating chunk format: {e}")
+            return False
+
     def process_conversation_file(self, base_path: str, document_name: str, force_reprocess: bool = False):
         """Process a complete document folder with all its conversation data."""
         doc_folder = Path(base_path) / document_name
@@ -362,6 +411,16 @@ class DoclingConversationEmbedder:
         # Load data
         conversation_data = self.load_conversation_data(str(chunks_file))
         speaker_analytics = self.load_speaker_analytics(str(analytics_file))
+
+        # Validate chunk format compatibility
+        sample_chunk = None
+        for conv_id, chunks in conversation_data["conversations"].items():
+            if chunks:
+                sample_chunk = chunks[0]
+                break
+
+        if sample_chunk and not self.validate_chunk_format(sample_chunk):
+            print(f"Warning: Chunk format validation failed for {document_name}. Proceeding with best effort.")
 
         total_chunks = 0
 
@@ -397,8 +456,14 @@ class DoclingConversationEmbedder:
 
         # Skip if already processed (unless forcing)
         if not force_reprocess:
-            file_mod_time = self.get_file_modification_time(str(chunks_file))
-            if self.is_file_processed(f"{str(chunks_file)}_segments", file_mod_time):
+            # Check modification times of BOTH files
+            chunks_mod_time = self.get_file_modification_time(str(chunks_file))
+            analytics_mod_time = self.get_file_modification_time(str(analytics_file))
+
+            # Create a combined modification signature
+            combined_mod_time = f"{chunks_mod_time}|{analytics_mod_time}"
+
+            if self.is_file_processed(f"{str(chunks_file)}_segments", combined_mod_time):
                 return
 
         conversation_data = self.load_conversation_data(str(chunks_file))
@@ -415,9 +480,12 @@ class DoclingConversationEmbedder:
             )
             total_segments += len(segments)
 
-        # Mark segments as processed
-        file_mod_time = self.get_file_modification_time(str(chunks_file))
-        self.mark_file_processed(f"{str(chunks_file)}_segments", file_mod_time, f"{document_name}_segments",
+        # Mark segments as processed with combined modification time
+        chunks_mod_time = self.get_file_modification_time(str(chunks_file))
+        analytics_mod_time = self.get_file_modification_time(str(analytics_file))
+        combined_mod_time = f"{chunks_mod_time}|{analytics_mod_time}"
+
+        self.mark_file_processed(f"{str(chunks_file)}_segments", combined_mod_time, f"{document_name}_segments",
                                  total_segments)
 
     def process_directory(self, base_path: str, force_reprocess: bool = False):
@@ -528,6 +596,16 @@ class DoclingConversationEmbedder:
 
 # Example usage with GPU optimization and memory monitoring
 def main():
+    import sys
+
+    # Check for command line argument
+    if len(sys.argv) > 1:
+        base_path = sys.argv[1]
+        print(f"Using provided path: {base_path}")
+    else:
+        base_path = r"D:\Docling Trial\Conversation_Chunks"
+        print(f"Using default path: {base_path}")
+
     # Initialize embedder with GPU support
     embedder = DoclingConversationEmbedder(use_gpu=True)
 
@@ -537,8 +615,9 @@ def main():
     # Create collection
     embedder.create_collection()
 
+    # Remove the old hardcoded path line and use the dynamic path
     # Process your conversation data directory
-    base_path = r"D:\Docling Trial\Conversation_Chunks"
+    # base_path = r"D:\Docling Trial\Conversation_Chunks"  # OLD LINE - REMOVED
 
     # Process with GPU acceleration and monitoring
     print("=== GPU-Accelerated Processing with Memory Monitoring ===")

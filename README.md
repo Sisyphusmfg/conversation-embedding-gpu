@@ -1,69 +1,64 @@
-# Conversation Embedding (GPU) — README
+```markdown
+# Conversation Embedding (GPU)
 
-This project ingests conversation data (chunks plus speaker analytics), generates embeddings using Sentence Transformers with optional GPU acceleration, and stores them in a Qdrant vector database. It also supports grouping contiguous utterances by the same speaker into segments and provides a basic semantic search over the stored content.
+This project ingests conversation data (utterance chunks plus speaker analytics), generates vector embeddings using Sentence Transformers with optional GPU acceleration, and stores them in a Qdrant vector database. It can also group contiguous utterances by speaker (segments) and provides a simple similarity search API over the stored content.
 
 ## Features
 
-- GPU-accelerated embedding generation with memory monitoring (falls back to CPU if no GPU is available).
-- Batch embedding for efficient processing.
-- Stores conversation chunks and speaker segments in Qdrant with rich metadata (speaker info, timestamps, word counts, etc.).
-- Tracks processed files to avoid reprocessing unchanged data.
-- Simple semantic search API with optional metadata filters.
-- Collection stats and processed-file status reporting.
+- GPU-accelerated embedding generation with automatic CPU fallback
+- Batch encoding for efficient throughput
+- Rich payload metadata for each stored item (speaker info, timestamps, word counts, etc.)
+- Speaker-segment creation and storage in addition to per-chunk storage
+- Processed-file tracking to skip unchanged inputs
+- Simple semantic search with optional metadata filtering
+- Collection stats and processed-file status
 
 ## Project Structure
 
-- src/
-  - Conversation Embedding Code.py — main script and embedding pipeline
-- Basic Validation Scripts/ — optional validations (if any)
+- src/__init__/Conversation Embedding Code.py — main script and library class
+- src/__init__/__init__.py — package initializer
 - requirements.txt — Python dependencies
+- README.md — this file
 
 ## Prerequisites
 
-- Python 3.9+ recommended
-- Qdrant running locally (default: http://localhost:6333)
-  - Option 1: Docker
-    - docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
-  - Option 2: Native install (see Qdrant docs)
-- Optional GPU (CUDA) for acceleration
-  - A compatible NVIDIA GPU and CUDA toolkit/driver
-  - A PyTorch build with CUDA support
+- Python 3.10+ recommended
+- Qdrant running locally (default URL: http://localhost:6333)
+  - Docker: docker run -p 6333:6333 -p 6334:6334 qdrant/qdrant
+- Optional GPU acceleration
+  - NVIDIA GPU with compatible CUDA drivers
+  - CUDA-enabled PyTorch build
 
 ## Installation
 
-```shell script
-# Create and activate a virtual environment (recommended)
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-# macOS/Linux
-source .venv/bin/activate
+Using a Conda environment is recommended for isolation and GPU compatibility.
+```
+bash
+# Create and activate a conda environment
+conda create -n conv-embed python=3.10 -y
+conda activate conv-embed
 
-# Upgrade pip
+# Upgrade pip and install dependencies
 python -m pip install --upgrade pip
-
-# Install dependencies
 pip install -r requirements.txt
 ```
-
-
-Dependencies (from requirements.txt):
+Dependencies include (see requirements.txt for exact versions):
 - torch, torchvision, torchaudio
 - sentence-transformers
 - transformers, accelerate
 - qdrant-client
 - numpy
 
-Note: If you need CUDA-enabled PyTorch, follow the installation matrix from the official PyTorch site to pick the right wheel for your CUDA version.
+Tip: For CUDA-enabled PyTorch, follow the official PyTorch install matrix to match your CUDA/driver version.
 
 ## Data Layout
 
-Prepare a base directory of conversation documents. Each document is a folder that contains two JSON files:
+Prepare a base directory of conversation documents. Each document is a folder containing two JSON files:
 
 - {document_name}_conversation_chunks.json
 - {document_name}_speaker_analytics.json
 
-Example layout:
+Example:
 - Conversation_Chunks/
   - ProjectKickoff/
     - ProjectKickoff_conversation_chunks.json
@@ -73,140 +68,129 @@ Example layout:
     - PerformanceReview_speaker_analytics.json
 
 Expected content overview:
-- conversation_chunks.json: Contains conversations keyed by conversation_id with chunk payloads (text, speaker, timestamp, chunk_index) and document_info.
-- speaker_analytics.json: Contains per-speaker statistics (display_name, participation metrics, etc.).
-
-Tip: The script expects to iterate through each subfolder inside the base directory and process matching pairs of files.
+- conversation_chunks.json: conversations keyed by conversation_id with chunk payloads (text, speaker, timestamp, chunk_index) and document_info.
+- speaker_analytics.json: per-speaker stats (display_name, utterance/word counts, participation, etc.).
 
 ## Configuration
 
-- Qdrant URL: Default http://localhost:6333. You can pass a different URL to the embedder when using the API from Python.
-- GPU usage: Enabled by default; automatically falls back to CPU if CUDA isn’t available.
-- Batch sizes: Defaults are tuned for a mid-range GPU and can be adjusted in the code if needed.
+- Qdrant URL: default http://localhost:6333
+- GPU usage: enabled by default; automatically falls back to CPU
+- Batch sizes: tuned for common GPUs; adjust if you encounter OOM or low utilization
+- Base data path: set to your Conversation_Chunks directory before running
 
-## Running the Pipeline
+## Quick Start
 
-Quick start (runs end-to-end with sensible defaults):
-
-```shell script
-python "src/Conversation Embedding Code.py"
+1) Ensure Qdrant is running locally.
+2) Configure the base data path to your Conversation_Chunks directory.
+3) Run the main script:
 ```
+bash
+# Pass the base path as an argument (recommended)
+python "src/__init__/Conversation Embedding Code.py" "D:/Path/To/Conversation_Chunks"
 
-
-Before running:
-- Ensure Qdrant is up (localhost:6333).
-- Update the base_path inside the script to point to your Conversation_Chunks directory.
-
-What it does:
-1. Initializes the embedder (GPU if available).
-2. Creates/ensures the required Qdrant collections:
-   - docling_conversations (main vectors, cosine distance, dim=384 for all-MiniLM-L6-v2)
-   - processed_files_log (tracking of processed input files)
-3. Processes all document subfolders under base_path:
-   - Loads chunks and speaker analytics
-   - Generates batch embeddings for chunks
-   - Stores points with rich payloads
-   - Groups contiguous utterances per speaker into segments, embeds, and stores them
-   - Marks files as processed to prevent reprocessing unchanged data
-4. Prints processed-file status and collection statistics
+# Or run without an argument to use the script's default path
+python "src/__init__/Conversation Embedding Code.py"
+```
+What happens:
+- Ensures required Qdrant collections:
+  - docling_conversations (main vectors, cosine distance)
+  - processed_files_log (metadata-only tracking)
+- Iterates through document subfolders:
+  - Loads chunks and speaker analytics
+  - Batch-encodes content and stores vectors with metadata
+  - Builds speaker segments, encodes, and stores them
+  - Marks files as processed to avoid reprocessing unchanged inputs
+- Prints processed-file status and collection statistics
 
 Reprocessing:
-- To force reprocessing (ignore processed-file checks), use the Python API and set force_reprocess=True for the relevant methods, or adjust the script accordingly.
+- You can force a re-run even if inputs are unchanged (e.g., by adjusting the `force_reprocess` parameter in the programmatic API).
 
 ## Programmatic Usage (Python)
 
-Below is an outline of the main capabilities you can call from Python. These names are provided to help you locate the corresponding functions and are not full code listings.
+The library surface supports:
+- Creating collections
+- Processing a directory or a single document
+- Creating and storing speaker segments
+- Searching by text query with optional metadata filters
+- Retrieving processed-file status and collection stats
 
-- Initialization:
-  - DoclingConversationEmbedder(qdrant_url="http://localhost:6333", use_gpu=True)
-
-- Collections:
-  - create_collection()
-
-- Processing:
-  - process_directory(base_path, force_reprocess=False)
-  - process_conversation_file(base_path, document_name, force_reprocess=False)
-  - create_and_store_segments(base_path, document_name, force_reprocess=False)
-
-- Search:
-  - search_conversations(query: str, limit: int = 5, filter_conditions: Optional[dict] = None) -> List[dict]
-
-- Status/Stats:
-  - get_processed_files_status() -> List[dict]
-  - get_collection_stats() -> dict
-
-Example (replace paths with yours):
-
-```python
+Example outline:
+```
+python
 # Python
-from src.Conversation_Embedding_Code import DoclingConversationEmbedder  # adjust import if needed
+# Adjust import path to your project layout
+from your_module import DoclingConversationEmbedder
 
 embedder = DoclingConversationEmbedder(qdrant_url="http://localhost:6333", use_gpu=True)
 embedder.create_collection()
-embedder.process_directory(r"/path/to/Conversation_Chunks")
 
+# Process a directory of document subfolders
+embedder.process_directory(r"/path/to/Conversation_Chunks", force_reprocess=False)
+
+# Search examples
 results = embedder.search_conversations("HR performance reviews", limit=3)
 for r in results:
     text = r["payload"].get("text") or r["payload"].get("combined_text", "")
     print(r["score"], r["payload"].get("speaker_display_name"), text[:100])
+
+# Collection statistics
+print(embedder.get_collection_stats())
+
+# Processed files status
+for info in embedder.get_processed_files_status():
+    print(info)
 ```
-
-
-Note: The exact import path may vary depending on your environment and how you run the script. If using the file directly, you can run the script and modify the base path in the main section.
+Note: Update the import path and base directory to match your environment.
 
 ## Qdrant Collections
 
 - docling_conversations
-  - Vector size: 384 (Sentence Transformers all-MiniLM-L6-v2)
   - Distance: cosine
-  - Payload includes conversation IDs, chunk indices, text, timestamps, speaker info, document metadata, and derived features.
+  - Vector size: matches the embedding model dimension (e.g., 384 for all-MiniLM-L6-v2)
+  - Payload: conversation IDs, chunk indices, text or combined_text, timestamps, speaker info, document metadata, and derived flags
 
 - processed_files_log
-  - Vector size: 1 (dummy vector — only metadata is used)
-  - Tracks file path, file modification time, document name, processed timestamp, and counts.
+  - Minimal vector used solely to store metadata about processed inputs
+  - Payload: file_path, file_modified_time, document_name, processed_at, counts
 
-## GPU Notes
+## Performance Tips
 
-- If a CUDA-capable GPU is available and use_gpu=True, the script will:
-  - Print GPU name and total memory
-  - Monitor and print GPU memory allocation over time
-- If GPU is not available, the script uses CPU and prints a message accordingly.
-- You can clear CUDA cache between large operations if needed.
+- GPU memory
+  - Reduce batch_size if you hit out-of-memory
+  - Clear CUDA cache between large conversations if needed
+- Throughput
+  - Keep batches sizable for better GPU utilization
+  - Avoid excessive per-item operations between batches
 
 ## Troubleshooting
 
-- Qdrant connection errors
-  - Ensure Qdrant is running and reachable at the configured URL.
-  - Check port conflicts (6333) and firewall rules.
+- Cannot connect to Qdrant
+  - Verify container/instance is running and ports are open
+  - Confirm URL and port (6333) are correct
+- CUDA not used
+  - Verify torch.cuda.is_available() in a Python shell
+  - Install a CUDA-enabled PyTorch matching your driver/CUDA version
+- Vector size mismatch
+  - Ensure your collection vector size matches your embedding model’s output dimension
+  - If you change models, recreate the collection accordingly
+- Nothing processes / everything “Already processed”
+  - Processed-file tracking skips unchanged inputs; force a re-run if desired
 
-- CUDA not used when expected
-  - Confirm torch.cuda.is_available() returns True in a Python shell.
-  - Install a CUDA-enabled PyTorch build matching your driver/CUDA version.
+## Roadmap Ideas
 
-- Reprocessing doesn’t happen
-  - The pipeline skips files that were already processed and unchanged.
-  - Use force_reprocess=True in processing calls, or modify the script’s main section to force a re-run.
-
-- Dimension mismatch in Qdrant
-  - Ensure the embedding model matches the collection vector size (all-MiniLM-L6-v2 => 384).
-  - If you change models, recreate the collection or create a new one with the correct size.
-
-## License
-
-Provide your chosen license here (e.g., MIT). If you haven’t decided, consider adding a LICENSE file.
-
-## Acknowledgments
-
-- Sentence Transformers (all-MiniLM-L6-v2) for embeddings
-- Qdrant for vector storage and search
+- Pluggable embedding models and vector sizes
+- Advanced search filters (time ranges, speakers, document subsets)
+- Optional RAG endpoints over the stored vectors
+- Export/import utilities for collections
 
 ## Contributing
 
-- Open issues or submit PRs for bug fixes and enhancements.
-- Please include clear reproduction steps and environment details for any issues.
+Issues and pull requests are welcome. Please include:
+- Environment details (OS, Python, CUDA/GPU if applicable)
+- Reproduction steps
+- Logs and error messages (if any)
 
-## Contact
+## License
 
-For questions or support, please open an issue. If you prefer email or another channel, add contact details here.
-
-— AI Assistant
+Add your preferred license (e.g., MIT) and include a LICENSE file.
+```
